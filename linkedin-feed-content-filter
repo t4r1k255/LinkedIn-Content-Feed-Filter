@@ -1,0 +1,468 @@
+// ==UserScript==
+// @name         LinkedIn Feed İçerik Filtresi
+// @namespace    https://github.com/
+// @version      1.0.0
+// @description  LinkedIn feed'inde anket, kutlama ve belirli kalıp paylaşımlarını gizler. Özel regex desteği, gizlenen gönderi sayacı ve geri al butonu içerir.
+// @author       OpenAI
+// @match        https://www.linkedin.com/*
+// @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const STORAGE_KEYS = {
+    paused: 'lfcf_paused',
+    customRegexSource: 'lfcf_custom_regex_source',
+  };
+
+  const DEFAULT_KEYWORDS = [
+    'anket',
+    'poll',
+    'kutlama',
+    'kutluyorum',
+    'kutluyoruz',
+    'work anniversary',
+    'iş yıl dönümü',
+    'heyecanla duyuruyorum',
+    'gururla paylaşmak istiyorum',
+    'excited to share',
+    'thrilled to announce',
+    'proud to share'
+  ];
+
+  const DEFAULT_REGEX_STRINGS = [
+    String.raw`\b\d+\s*(y[ıi]l|ay)\b.*\b(kutlu|kutlama|d[ou]ldu|anniversary)\b`,
+    String.raw`\b(bu\s+payla[sş][ıi]m[ıi]\s+kutluyorum)\b`,
+    String.raw`\b(i[şs]\s+y[ıi]l\s+d[öo]n[üu]m[üu])\b`,
+    String.raw`\b(yeni\s+pozisyonumu\s+heyecanla\s+payla[sş][ıi]yorum)\b`
+  ];
+
+  const state = {
+    paused: safeBool(GM_getValue(STORAGE_KEYS.paused, false)),
+    hiddenEntries: [],
+    panel: null,
+    countEl: null,
+    pauseBtn: null,
+    observer: null,
+    scanTimer: null,
+    debounceTimer: null,
+  };
+
+  GM_addStyle(`
+    #lfcf-panel {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 999999;
+      width: 300px;
+      max-width: calc(100vw - 24px);
+      background: rgba(16, 18, 20, 0.95);
+      color: #e8e8e8;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.28);
+      backdrop-filter: blur(8px);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      overflow: hidden;
+    }
+    #lfcf-panel * { box-sizing: border-box; }
+    .lfcf-header {
+      padding: 14px 16px 8px;
+      font-size: 15px;
+      font-weight: 700;
+      color: #f4f4f4;
+    }
+    .lfcf-body {
+      padding: 0 16px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #c8c8c8;
+    }
+    .lfcf-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      margin: 8px 0 10px;
+      border-radius: 999px;
+      background: rgba(231, 188, 72, 0.18);
+      color: #f0d889;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .lfcf-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .lfcf-btn {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: #f4f4f4;
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+    .lfcf-btn:hover {
+      background: rgba(255,255,255,0.08);
+    }
+    .lfcf-btn--primary {
+      background: rgba(10, 102, 194, 0.18);
+      border-color: rgba(10, 102, 194, 0.45);
+      color: #8fc4ff;
+    }
+    .lfcf-btn--warn {
+      background: rgba(234, 67, 53, 0.12);
+      border-color: rgba(234, 67, 53, 0.35);
+      color: #ffb1aa;
+    }
+    .lfcf-muted {
+      color: #9ba3ad;
+      font-size: 12px;
+    }
+    .lfcf-placeholder {
+      border: 1px dashed rgba(255,255,255,0.14);
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      background: rgba(19,20,23,0.9);
+      color: #d9d9d9;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .lfcf-placeholder strong {
+      color: #fff;
+    }
+    .lfcf-placeholder-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .lfcf-placeholder button {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.04);
+      color: #f4f4f4;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+  `);
+
+  GM_registerMenuCommand('Özel regex desenlerini düzenle', openRegexPrompt);
+  GM_registerMenuCommand(state.paused ? 'Filtreyi başlat' : 'Filtreyi duraklat', togglePaused);
+
+  init();
+
+  function init() {
+    createPanel();
+    waitForFeedThenStart();
+  }
+
+  function waitForFeedThenStart() {
+    const tryStart = () => {
+      if (!document.body) {
+        requestAnimationFrame(tryStart);
+        return;
+      }
+      startObservers();
+      scanFeed();
+    };
+    tryStart();
+  }
+
+  function startObservers() {
+    if (state.observer) {
+      state.observer.disconnect();
+    }
+
+    state.observer = new MutationObserver(() => {
+      if (state.debounceTimer) clearTimeout(state.debounceTimer);
+      state.debounceTimer = setTimeout(scanFeed, 350);
+    });
+
+    state.observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    if (state.scanTimer) clearInterval(state.scanTimer);
+    state.scanTimer = setInterval(scanFeed, 2500);
+  }
+
+  function createPanel() {
+    const panel = document.createElement('section');
+    panel.id = 'lfcf-panel';
+    panel.innerHTML = `
+      <div class="lfcf-header">Feed İçerik Filtresi</div>
+      <div class="lfcf-body">
+        <div class="lfcf-chip">Gizlenen gönderi: <span id="lfcf-count">0</span></div>
+        <div>
+          LinkedIn feed'ini daha sakin hale getirir. Varsayılan olarak anket, kutlama ve belli kalıp paylaşımları gizler.
+        </div>
+        <div class="lfcf-actions">
+          <button type="button" class="lfcf-btn lfcf-btn--primary" id="lfcf-regex-btn">Regex Ayarla</button>
+          <button type="button" class="lfcf-btn" id="lfcf-undo-btn">Son Gizlemeyi Geri Al</button>
+          <button type="button" class="lfcf-btn lfcf-btn--warn" id="lfcf-pause-btn"></button>
+        </div>
+        <div class="lfcf-muted" style="margin-top:10px;">İpucu: Her satıra bir regex olacak şekilde kendi desenlerini ekleyebilirsin.</div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+
+    state.panel = panel;
+    state.countEl = panel.querySelector('#lfcf-count');
+    state.pauseBtn = panel.querySelector('#lfcf-pause-btn');
+
+    panel.querySelector('#lfcf-regex-btn')?.addEventListener('click', openRegexPrompt);
+    panel.querySelector('#lfcf-undo-btn')?.addEventListener('click', restoreLastHidden);
+    state.pauseBtn?.addEventListener('click', togglePaused);
+
+    syncPauseButton();
+    updateCounter();
+  }
+
+  function getAllRules() {
+    const keywordRules = DEFAULT_KEYWORDS.map((keyword) => ({
+      label: `Anahtar kelime: ${keyword}`,
+      test(text) {
+        return text.includes(keyword.toLocaleLowerCase('tr-TR'));
+      },
+    }));
+
+    const regexRules = [];
+    for (const source of [...DEFAULT_REGEX_STRINGS, ...getCustomRegexStrings()]) {
+      try {
+        const regex = new RegExp(source, 'i');
+        regexRules.push({
+          label: `Regex: ${source}`,
+          test(text) {
+            return regex.test(text);
+          },
+        });
+      } catch (error) {
+        console.warn('[LFCF] Geçersiz regex atlandı:', source, error);
+      }
+    }
+
+    return [...keywordRules, ...regexRules];
+  }
+
+  function scanFeed() {
+    if (state.paused) return;
+
+    const rules = getAllRules();
+    const posts = getCandidatePosts();
+
+    for (const post of posts) {
+      if (!(post instanceof HTMLElement)) continue;
+      if (post.dataset.lfcfScanned === '1') continue;
+      if (post.closest('#lfcf-panel')) continue;
+
+      const text = normalize(post.innerText || '');
+      if (!text || text.length < 20) {
+        post.dataset.lfcfScanned = '1';
+        continue;
+      }
+
+      const matchedRule = rules.find((rule) => {
+        try {
+          return rule.test(text);
+        } catch (error) {
+          console.warn('[LFCF] Kural hatası:', rule.label, error);
+          return false;
+        }
+      });
+
+      if (matchedRule) {
+        hidePost(post, matchedRule.label);
+      } else {
+        post.dataset.lfcfScanned = '1';
+      }
+    }
+
+    cleanupEntries();
+    updateCounter();
+  }
+
+  function getCandidatePosts() {
+    const selectors = [
+      'div.feed-shared-update-v2',
+      'div.occludable-update',
+      'article',
+      '[data-urn*="urn:li:activity"]'
+    ];
+
+    const set = new Set();
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((el) => {
+        const post = closestPostContainer(el);
+        if (post) set.add(post);
+      });
+    }
+    return [...set];
+  }
+
+  function closestPostContainer(el) {
+    if (!(el instanceof HTMLElement)) return null;
+    return el.closest('div.feed-shared-update-v2, div.occludable-update, article, [data-urn*="urn:li:activity"]') || el;
+  }
+
+  function hidePost(post, reason) {
+    if (post.dataset.lfcfHidden === '1') return;
+
+    const placeholder = document.createElement('div');
+    placeholder.className = 'lfcf-placeholder';
+    placeholder.innerHTML = `
+      <div><strong>Gönderi gizlendi.</strong></div>
+      <div class="lfcf-muted" style="margin-top:4px;">Neden: ${escapeHtml(reason)}</div>
+      <div class="lfcf-placeholder-actions">
+        <button type="button" data-action="restore">Geri al</button>
+        <button type="button" data-action="show">Geçici göster</button>
+      </div>
+    `;
+
+    placeholder.querySelector('[data-action="restore"]')?.addEventListener('click', () => restorePost(post));
+    placeholder.querySelector('[data-action="show"]')?.addEventListener('click', () => temporarilyShow(post));
+
+    post.dataset.lfcfHidden = '1';
+    post.dataset.lfcfScanned = '1';
+    post.style.display = 'none';
+    post.parentNode?.insertBefore(placeholder, post);
+
+    state.hiddenEntries.push({ post, placeholder, reason });
+    updateCounter();
+  }
+
+  function temporarilyShow(post) {
+    const entry = state.hiddenEntries.find((item) => item.post === post);
+    if (!entry) return;
+
+    post.style.display = '';
+    setTimeout(() => {
+      if (!document.body.contains(post) || post.dataset.lfcfHidden !== '1') return;
+      post.style.display = 'none';
+    }, 8000);
+  }
+
+  function restorePost(post) {
+    const index = state.hiddenEntries.findIndex((item) => item.post === post);
+    if (index === -1) return;
+
+    const entry = state.hiddenEntries[index];
+    post.style.display = '';
+    post.dataset.lfcfHidden = '0';
+    post.dataset.lfcfScanned = '0';
+    entry.placeholder.remove();
+    state.hiddenEntries.splice(index, 1);
+    updateCounter();
+  }
+
+  function restoreLastHidden() {
+    cleanupEntries();
+    const last = [...state.hiddenEntries].reverse().find((entry) => document.body.contains(entry.post));
+    if (!last) {
+      alert('Geri alınacak gizlenmiş gönderi yok.');
+      return;
+    }
+    restorePost(last.post);
+  }
+
+  function cleanupEntries() {
+    state.hiddenEntries = state.hiddenEntries.filter((entry) => {
+      const valid = document.body.contains(entry.post) && document.body.contains(entry.placeholder);
+      return valid;
+    });
+  }
+
+  function openRegexPrompt() {
+    const current = getCustomRegexStrings().join('\n');
+    const input = window.prompt(
+      [
+        'Her satıra bir regex olacak şekilde özel filtre desenlerini gir.',
+        'Örnek:',
+        '^(?=.*remote)(?=.*work)',
+        'work\\s+anniversary',
+        '',
+        'Boş bırakırsan özel regexler temizlenir.'
+      ].join('\n'),
+      current
+    );
+
+    if (input === null) return;
+
+    GM_setValue(STORAGE_KEYS.customRegexSource, input.trim());
+    resetScanState();
+    scanFeed();
+  }
+
+  function getCustomRegexStrings() {
+    const source = String(GM_getValue(STORAGE_KEYS.customRegexSource, '') || '').trim();
+    if (!source) return [];
+    return source
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function resetScanState() {
+    document.querySelectorAll('[data-lfcf-scanned]').forEach((el) => {
+      if (el instanceof HTMLElement) el.dataset.lfcfScanned = '0';
+    });
+  }
+
+  function togglePaused() {
+    state.paused = !state.paused;
+    GM_setValue(STORAGE_KEYS.paused, state.paused);
+    syncPauseButton();
+
+    if (!state.paused) {
+      scanFeed();
+      return;
+    }
+  }
+
+  function syncPauseButton() {
+    if (!state.pauseBtn) return;
+    state.pauseBtn.textContent = state.paused ? 'Filtreyi Başlat' : 'Filtreyi Durdur';
+  }
+
+  function updateCounter() {
+    cleanupEntries();
+    if (state.countEl) state.countEl.textContent = String(state.hiddenEntries.length);
+  }
+
+  function normalize(text) {
+    return String(text || '')
+      .toLocaleLowerCase('tr-TR')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function safeBool(value) {
+    return value === true || value === 'true';
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+})();
