@@ -2,7 +2,7 @@
 
 LinkedIn ana akışını daha okunabilir hale getirmek için hazırlanmış bir **Tampermonkey userscript**.
 
-Bu script; anket, kutlama, iş yıl dönümü ve benzer kalıp paylaşımlarını otomatik olarak tespit edip gizler. Ayrıca özel regex desteği, gizlenen gönderi sayacı ve yanlış pozitifler için **geri al** butonu içerir.
+Bu script; anket, kutlama, iş yıl dönümü ve benzer kalıp paylaşımlarını otomatik olarak tespit edip gizler.
 
 ## Özellikler
 
