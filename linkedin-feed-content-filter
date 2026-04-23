@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LinkedIn Feed İçerik Filtresi
 // @namespace    https://github.com/
-// @version      1.0.0
-// @description  LinkedIn feed'inde anket, kutlama ve belirli kalıp paylaşımlarını gizler. Özel regex desteği, gizlenen gönderi sayacı ve geri al butonu içerir.
+// @version      1.1.0
+// @description  LinkedIn feed'inde anket, kutlama ve belirli kalıp paylaşımlarını gizler. Anahtar kelime desteği, gizlenen gönderi sayacı ve geri al butonu içerir.
 // @author       OpenAI
 // @match        https://www.linkedin.com/*
 // @grant        GM_addStyle
@@ -17,7 +17,7 @@
 
   const STORAGE_KEYS = {
     paused: 'lfcf_paused',
-    customRegexSource: 'lfcf_custom_regex_source',
+    customKeywords: 'lfcf_custom_keywords',
   };
 
   const DEFAULT_KEYWORDS = [
@@ -48,6 +48,7 @@
     panel: null,
     countEl: null,
     pauseBtn: null,
+    keywordInfoEl: null,
     observer: null,
     scanTimer: null,
     debounceTimer: null,
@@ -56,10 +57,10 @@
   GM_addStyle(`
     #lfcf-panel {
       position: fixed;
-      right: 18px;
+      left: 18px;
       bottom: 18px;
       z-index: 999999;
-      width: 300px;
+      width: 320px;
       max-width: calc(100vw - 24px);
       background: rgba(16, 18, 20, 0.95);
       color: #e8e8e8;
@@ -130,6 +131,16 @@
       color: #9ba3ad;
       font-size: 12px;
     }
+    .lfcf-keyword-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      color: #cfd6de;
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .lfcf-placeholder {
       border: 1px dashed rgba(255,255,255,0.14);
       border-radius: 14px;
@@ -162,7 +173,7 @@
     }
   `);
 
-  GM_registerMenuCommand('Özel regex desenlerini düzenle', openRegexPrompt);
+  GM_registerMenuCommand('Özel anahtar kelimeleri düzenle', openKeywordPrompt);
   GM_registerMenuCommand(state.paused ? 'Filtreyi başlat' : 'Filtreyi duraklat', togglePaused);
 
   init();
@@ -213,12 +224,13 @@
         <div>
           LinkedIn feed'ini daha sakin hale getirir. Varsayılan olarak anket, kutlama ve belli kalıp paylaşımları gizler.
         </div>
+        <div class="lfcf-keyword-box" id="lfcf-keyword-info"></div>
         <div class="lfcf-actions">
-          <button type="button" class="lfcf-btn lfcf-btn--primary" id="lfcf-regex-btn">Regex Ayarla</button>
+          <button type="button" class="lfcf-btn lfcf-btn--primary" id="lfcf-keyword-btn">Kelime Ekle</button>
           <button type="button" class="lfcf-btn" id="lfcf-undo-btn">Son Gizlemeyi Geri Al</button>
           <button type="button" class="lfcf-btn lfcf-btn--warn" id="lfcf-pause-btn"></button>
         </div>
-        <div class="lfcf-muted" style="margin-top:10px;">İpucu: Her satıra bir regex olacak şekilde kendi desenlerini ekleyebilirsin.</div>
+        <div class="lfcf-muted" style="margin-top:10px;">İpucu: Anahtar kelimeleri alt alta ya da virgülle ekleyebilirsin.</div>
       </div>
     `;
 
@@ -227,25 +239,30 @@
     state.panel = panel;
     state.countEl = panel.querySelector('#lfcf-count');
     state.pauseBtn = panel.querySelector('#lfcf-pause-btn');
+    state.keywordInfoEl = panel.querySelector('#lfcf-keyword-info');
 
-    panel.querySelector('#lfcf-regex-btn')?.addEventListener('click', openRegexPrompt);
+    panel.querySelector('#lfcf-keyword-btn')?.addEventListener('click', openKeywordPrompt);
     panel.querySelector('#lfcf-undo-btn')?.addEventListener('click', restoreLastHidden);
     state.pauseBtn?.addEventListener('click', togglePaused);
 
     syncPauseButton();
+    syncKeywordInfo();
     updateCounter();
   }
 
   function getAllRules() {
-    const keywordRules = DEFAULT_KEYWORDS.map((keyword) => ({
-      label: `Anahtar kelime: ${keyword}`,
-      test(text) {
-        return text.includes(keyword.toLocaleLowerCase('tr-TR'));
-      },
-    }));
+    const keywordRules = [...DEFAULT_KEYWORDS, ...getCustomKeywords()].map((keyword) => {
+      const normalizedKeyword = normalize(keyword);
+      return {
+        label: `Anahtar kelime: ${keyword}`,
+        test(text) {
+          return text.includes(normalizedKeyword);
+        },
+      };
+    });
 
     const regexRules = [];
-    for (const source of [...DEFAULT_REGEX_STRINGS, ...getCustomRegexStrings()]) {
+    for (const source of DEFAULT_REGEX_STRINGS) {
       try {
         const regex = new RegExp(source, 'i');
         regexRules.push({
@@ -255,7 +272,7 @@
           },
         });
       } catch (error) {
-        console.warn('[LFCF] Geçersiz regex atlandı:', source, error);
+        console.warn('[LFCF] Geçersiz varsayılan regex atlandı:', source, error);
       }
     }
 
@@ -384,39 +401,62 @@
 
   function cleanupEntries() {
     state.hiddenEntries = state.hiddenEntries.filter((entry) => {
-      const valid = document.body.contains(entry.post) && document.body.contains(entry.placeholder);
-      return valid;
+      return document.body.contains(entry.post) && document.body.contains(entry.placeholder);
     });
   }
 
-  function openRegexPrompt() {
-    const current = getCustomRegexStrings().join('\n');
+  function openKeywordPrompt() {
+    const current = getCustomKeywords().join('\n');
     const input = window.prompt(
       [
-        'Her satıra bir regex olacak şekilde özel filtre desenlerini gir.',
-        'Örnek:',
-        '^(?=.*remote)(?=.*work)',
-        'work\\s+anniversary',
+        'Gizlemek istediğin kelime veya cümleleri gir.',
+        'Her satıra bir tane yazabilir ya da virgülle ayırabilirsin.',
         '',
-        'Boş bırakırsan özel regexler temizlenir.'
+        'Örnek:',
+        'x yıl çalışıyorum',
+        'kutlama',
+        'heyecanla duyuruyorum',
+        '',
+        'Boş bırakırsan özel kelimeler temizlenir.'
       ].join('\n'),
       current
     );
 
     if (input === null) return;
 
-    GM_setValue(STORAGE_KEYS.customRegexSource, input.trim());
+    const keywords = splitKeywords(input);
+    GM_setValue(STORAGE_KEYS.customKeywords, JSON.stringify(keywords));
+    syncKeywordInfo();
     resetScanState();
     scanFeed();
   }
 
-  function getCustomRegexStrings() {
-    const source = String(GM_getValue(STORAGE_KEYS.customRegexSource, '') || '').trim();
-    if (!source) return [];
-    return source
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+  function getCustomKeywords() {
+    const raw = String(GM_getValue(STORAGE_KEYS.customKeywords, '[]') || '[]');
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map((item) => String(item).trim()).filter(Boolean);
+    } catch (error) {
+      console.warn('[LFCF] Özel kelimeler okunamadı:', error);
+      return [];
+    }
+  }
+
+  function splitKeywords(input) {
+    return String(input || '')
+      .split(/[\n,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((value, index, arr) => arr.findIndex((x) => normalize(x) === normalize(value)) === index);
+  }
+
+  function syncKeywordInfo() {
+    if (!state.keywordInfoEl) return;
+    const customKeywords = getCustomKeywords();
+    state.keywordInfoEl.innerHTML = customKeywords.length
+      ? `<strong>Özel kelimeler:</strong> ${customKeywords.map(escapeHtml).join(', ')}`
+      : '<strong>Özel kelimeler:</strong> Henüz eklenmedi';
   }
 
   function resetScanState() {
@@ -432,7 +472,6 @@
 
     if (!state.paused) {
       scanFeed();
-      return;
     }
   }
 
