@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         LinkedIn Feed İçerik Filtresi
-// @namespace    https://github.com/
+// @namespace    https://github.com/t4r1k255/LinkedIn-Content-Feed-Filter
 // @version      1.1.0
 // @description  LinkedIn feed'inde anket, kutlama ve belirli kalıp paylaşımlarını gizler. Anahtar kelime desteği, gizlenen gönderi sayacı ve geri al butonu içerir.
-// @author       OpenAI
+// @author       t4r1k255
 // @match        https://www.linkedin.com/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
